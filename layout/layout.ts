@@ -12,7 +12,7 @@ export const BONDING_CURV = struct([
     // u64('initialRealTokenReserves'),
     // u64('tokenTotalSupply'),
     // u64('feeBasisPoints'),
-    u64('virtualTokenReservs'),
+    u64('virtualTokenReserves'),
     u64('virtualSolReserves'),
     u64('realTokenReserves'),
     u64('realSolReserves'),

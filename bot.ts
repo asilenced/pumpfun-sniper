@@ -10,25 +10,21 @@ import {
   ComputeBudgetProgram,
   sendAndConfirmTransaction,
   sendAndConfirmRawTransaction,
+  TransactionExpiredBlockheightExceededError,
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   TOKEN_PROGRAM_ID,
   closeAccount,
   createAssociatedTokenAccountInstruction,
+  createCloseAccountInstruction,
   getAssociatedTokenAddress,
   getMint,
 } from "@solana/spl-token";
+
 import {
-  connection,
-  deployerPubkey,
-  payerKeypair,
-  privateKeys,
-  distributionPerWallet,
-  tokenDecimal,
-  buySolAmounts,
-  jitoFee,
   commitment,
+  feePayer
 } from "./config";
 import {
   bufferFromUInt64,
@@ -37,7 +33,16 @@ import {
   saveDataToFile,
   sendAndConfirmTransactionWrapper,
   sleep,
+  logger
 } from "./utility";
+import {
+  bundle,
+  execute
+} from "./executor";
+import {
+  BONDINGCURVECUSTOM,
+  BONDING_CURV
+} from "./layout/layout";
 import {
   GLOBAL,
   FEE_RECIPIENT,
@@ -46,36 +51,66 @@ import {
   RENT,
   PUMP_FUN_ACCOUNT,
   PUMP_FUN_PROGRAM,
-  UNIT_PRICE,
-  UNIT_BUDGET,
   CHECK_FILTER,
   JITO_MODE,
-  JITO_ALL,
-  RPC_ENDPOINT,
-  RPC_WEBSOCKET_ENDPOINT,
   ASSOC_TOKEN_ACC_PROG,
+  // AUTO_BUY,
+  // AUTO_SELL,
+  // TX_NUMBER_BUY,
+  // TX_NUMBER_SELL,
+  // TAKE_PROFIT,
+  STOP_LOSS,
+  // TX_DELAY,
+  // FEE_PER_TX,
+  // UNITS,
+  // CHECK_DEV_SELL,
+  // SOL_IN,
 } from "./constants";
-// import base58 from "bs58";
-// import { sendBulkToken } from "./sendBulk";
-// import { commitment } from "./constants";
+
 import { filterToken } from "./tokenFilter";
-import { BONDINGCURVECUSTOM, BONDING_CURV } from "./layout";
-import { logger } from "./utility/index";
-import { bundle } from "./executor/executor";
-import { execute } from "./executor/legacy";
+import fs from "fs"
 import BN from "bn.js";
+import base58 from "bs58";
 
-const existingLiquidityPools: Set<string> = new Set<string>();
+const fileName = "./config.json"
+const fileName2 = "./config_sniper.json"
 
-let poolId: PublicKey;
+let file_content = fs.readFileSync(fileName, 'utf-8');
+let file_content2 = fs.readFileSync(fileName2, 'utf-8');
+let content = JSON.parse(file_content);
+let content2 = JSON.parse(file_content2);
+
+const RPC_ENDPOINT = content.RPC_ENDPOINT;
+const RPC_WEBSOCKET_ENDPOINT = content.RPC_WEBSOCKET_ENDPOINT;
+const SLIPPAGE = content.Slippage;
+const PAYERPRIVATEKEY = content.PAYERPRIVATEKEY;
+const payerKeypair = Keypair.fromSecretKey(base58.decode(PAYERPRIVATEKEY));
+
+const solIn = content2.solIn;
+const txNum = content2.txNum;
+const takeProfit = content2.takeProfit;
+const stopLoss = content2.stopLoss;
+const txDelay = content2.txDelay;
+const txFee = content2.txFee;
+const computeUnit = content2.computeUnit;
+
+const connection = new Connection(RPC_ENDPOINT, { wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment: "processed" });
+
+let virtualSolReserves: BN;
+let virtualTokenReserves: BN;
+
+const TRADE_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+const BONDING_ADDR_SEED = new Uint8Array([98, 111, 110, 100, 105, 110, 103, 45, 99, 117, 114, 118, 101]);
+
+let bonding: PublicKey;
+let assoc_bonding_addr: PublicKey;
 
 let isBuying = false;
 let isBought = false;
+let buyPrice: number;
 let globalLogListener: number | null = null
 
-const runListener = async () => {
-  // await init();
-
+export const runListener = async () => {
   try {
     globalLogListener = connection.onLogs(
       PUMP_FUN_PROGRAM,
@@ -83,7 +118,8 @@ const runListener = async () => {
         const isMint = logs.filter(log => log.includes("MintTo")).length;
         if (!isBuying && isMint && !isBought) {
           isBuying = true
-          console.log("\n-------------Found new token in the pump.fun:-------------------\n")
+
+          console.log("\n============== Found new token in the pump.fun: ==============\n")
           console.log("signature: ", signature);
 
           const parsedTransaction = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" });
@@ -100,55 +136,54 @@ const runListener = async () => {
           console.log("tokenPoolAta:", tokenPoolAta)
           console.log("wallet:", wallet)
 
+          // check token if the filtering condition is ok
           if (CHECK_FILTER) {
+
+            // true if the filtering condition is ok, false if the filtering conditin is false
             const buyable = await filterToken(connection, mint!, commitment, wallet!, tokenPoolAta!);
 
             console.log("🚀 ~ Token is Buyable:", buyable)
             if (buyable) {
-              console.log("Buy tokens here!");
 
-              console.log("-------Token Buy start----------");
+              await getPoolState(mint);
+
+              console.log("========= Token Buy start ==========");
 
               try {
                 connection.removeOnLogsListener(globalLogListener!)
                 console.log("Global listener is removed!");
-              } catch(err) {
+              } catch (err) {
                 console.log(err);
               }
 
-              await buy(payerKeypair, mint, 0.001, 10);
+              // buy transaction
+              await buy(payerKeypair, mint, solIn / 10 ** 9, 10);
 
-              console.log("-------Token Buy end----------");
+              console.log("========= Token Buy end ===========");
 
               const buyerAta = await getAssociatedTokenAddress(mint, payerKeypair.publicKey)
-              console.log("BuyerAta: ", buyerAta);
+              // console.log("BuyerAta: ", buyerAta);
               const balance = (await connection.getTokenAccountBalance(buyerAta)).value.amount
-              console.log("BuyerAtaBalance: ", balance);
-              
-              console.log("-------Token Sell start----------");
+              // console.log("BuyerAtaBalance: ", balance);
+              const priorityFeeInSol = computeUnit * txFee / 10 ** 9 / 10 ** 6;
 
-              if(!balance) {
+              console.log("========== Token Sell start ===========");
+
+              await getPoolState(mint);
+
+              if (!balance) {
                 console.log("There is no token in this wallet.");
               } else {
-                await sell(payerKeypair, mint, Number(balance), 0.00002, 1, buyerAta);
+                // sell transaction
+                await sell(payerKeypair, mint, Number(balance), priorityFeeInSol, SLIPPAGE / 100, buyerAta);
               }
 
-                // await sell(payerKeypair, new PublicKey("PwPQqY8XQavXYyPeTj3nYRCrTCE4HFHAwKrKcTWpump"), 6524, 0.00002, 1, new PublicKey("FYUyCGvqPCHnALJ9H6RAuhXzemPyKqBWL8a4J8HipCKS"));
-
-              console.log("-------Token Sell end----------");
-              
-              console.log("-------Close Associated Token Account start----------");
-
-              // await closeAccount(connection, payerKeypair, buyerAta, payerKeypair.publicKey, payerKeypair)
-              console.log("Closed accounts successfully.");
-              
-              console.log("-------Close Associated Token Account end----------");
-
+              console.log("========== Token Sell end ==========");
             }
           }
           isBuying = false
           console.log("isBuying: ", isBuying);
-          if(isBought) process.exit(1);
+          // if (isBought) process.exit(1);
         }
       },
       commitment
@@ -172,13 +207,12 @@ export const buy = async (
   let buyerAta = await getAssociatedTokenAddress(tokenMint, buyerWallet)
 
   try {
-    const transactions: VersionedTransaction[] = []
 
-    console.log("🚀 ~ buyerAta:", buyerAta)
+    // console.log("🚀 ~ buyerAta:", buyerAta)
 
     let ixs: TransactionInstruction[] = [
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: UNIT_PRICE }),
-      ComputeBudgetProgram.setComputeUnitLimit({ units: UNIT_BUDGET })
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: txFee }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnit })
     ];
 
     // Attempt to retrieve token account, otherwise create associated token account
@@ -199,39 +233,18 @@ export const buy = async (
       return
     }
 
-    const TRADE_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-    const BONDING_ADDR_SEED = new Uint8Array([98, 111, 110, 100, 105, 110, 103, 45, 99, 117, 114, 118, 101]);
-
-    // get the address of bonding curve and associated bonding curve
-    const [bonding] = PublicKey.findProgramAddressSync([BONDING_ADDR_SEED, tokenMint.toBuffer()], TRADE_PROGRAM_ID);
-    const [assoc_bonding_addr] = PublicKey.findProgramAddressSync([bonding.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), tokenMint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM_ID);
-
-    // get the accountinfo of bonding curve
-    const accountInfo = await connection.getAccountInfo(bonding, "processed")
-    console.log("🚀 ~ accountInfo:", accountInfo)
-
-    if (!accountInfo) return
-
-    // get the poolstate of the bonding curve
-    const poolState = BONDING_CURV.decode(
-      accountInfo.data
-    );
-    console.log("🚀 ~ poolState:", poolState)
-    console.log("virtualTokenReserves: ", poolState.virtualTokenReservs.toString());
-    console.log("realTokenReserves: ", poolState.realTokenReserves.toString());
-    // Calculate tokens out
-    const virtualSolReserves = poolState.virtualSolReserves;
-    const virtualTokenReserves = poolState.virtualTokenReservs;
-    // const solIn = solIns[i]
     const solInLamports = solIn * LAMPORTS_PER_SOL;
-    console.log("🚀 ~ solInLamports:", solInLamports)
+    // console.log("🚀 ~ solInLamports:", solInLamports)
     const tokenOut = Math.round(solInLamports * (virtualTokenReserves.div(virtualSolReserves)).toNumber());
-    console.log("🚀 ~ tokenOut:", tokenOut)
+    // console.log("🚀 ~ tokenOut:", tokenOut)
+
+    // Calculate the buy price of the token
+    buyPrice = (virtualTokenReserves.div(virtualSolReserves)).toNumber();
 
     const ATA_USER = buyerAta;
     const USER = buyerWallet;
-    console.log("🚀 ~ buyerAta:", buyerAta)
-    console.log("🚀 ~ buyerWallet:", buyerWallet)
+    // console.log("🚀 ~ buyerAta:", buyerAta)
+    // console.log("🚀 ~ buyerWallet:", buyerWallet)
 
     // Build account key list
     const keys = [
@@ -249,16 +262,17 @@ export const buy = async (
       { pubkey: PUMP_FUN_PROGRAM, isSigner: false, isWritable: false }
     ];
 
-    keys.map(async ({ pubkey }, i) => {
-      const info = await connection.getAccountInfo(pubkey, "confirmed")
-      if (!info) console.log(pubkey.toBase58(), " address info : null : ", i)
-    })
+    // keys.map(async ({ pubkey }, i) => {
+    //   const info = await connection.getAccountInfo(pubkey, "confirmed")
+    //   if (!info) console.log(pubkey.toBase58(), " address info : null : ", i)
+    // })
 
     // Calculating the slippage process
     const calc_slippage_up = (sol_amount: number, slippage: number): number => {
       const lamports = sol_amount * LAMPORTS_PER_SOL;
       // return Math.round(lamports * (1 + slippage));
-      return Math.round(lamports / 1000 * (1 + slippage) + lamports / 1000 * (1 + slippage));
+      // return Math.round(lamports / 1000 * (1 + slippage) + lamports / 1000 * (1 + slippage));
+      return Math.round(lamports / 1000 * (1 + slippage / 100));
     }
 
     const instruction_buf = Buffer.from('66063d1201daebea', 'hex');
@@ -291,7 +305,7 @@ export const buy = async (
     const transaction = new VersionedTransaction(messageV0)
     transaction.sign([buyerKeypair])
     console.log("==============================================")
-    console.log(await connection.simulateTransaction(transaction, { commitment: "processed" }))
+    // console.log(await connection.simulateTransaction(transaction, { commitment: "processed" }))
     // transactions.push(transaction)
 
     // Bundling process
@@ -311,7 +325,7 @@ export const buy = async (
   console.log("---------Checking the result---------")
   let index = 0
   while (true) {
-    if (index > 10) {
+    if (index > txNum) {
       console.log("token sniping failed")
       return
     }
@@ -324,7 +338,7 @@ export const buy = async (
       }
     } catch (error) {
       index++
-      await sleep(1000)
+      await sleep(txDelay)
     }
   }
   console.log("Bundling result confirmed, successfully bought")
@@ -334,64 +348,37 @@ export const buy = async (
 
 
 
-
-
-
-
-export async function sell(payerKeypair: Keypair, mint: PublicKey, tokenBalance: number, priorityFeeInSol: number = 0, slippageDecimal: number = 0.25, tokenAccountAddress: PublicKey) {
+export async function sell(
+  payerKeypair: Keypair,
+  mint: PublicKey,
+  tokenBalance: number,
+  priorityFeeInSol: number = 0,
+  slippageDecimal: number = 0.25,
+  tokenAccountAddress: PublicKey
+) {
+  
   try {
-
     const owner = payerKeypair;
     const txBuilder = new Transaction();
-
-    const TRADE_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-    const BONDING_ADDR_SEED = new Uint8Array([98, 111, 110, 100, 105, 110, 103, 45, 99, 117, 114, 118, 101]);
-
-    // get the address of bonding curve and associated bonding curve
-    const [bonding] = PublicKey.findProgramAddressSync([BONDING_ADDR_SEED, mint.toBuffer()], TRADE_PROGRAM_ID);
-    const [assoc_bonding_addr] = PublicKey.findProgramAddressSync([bonding.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM_ID);
-
-    // get the accountinfo of bonding curve
-    const accountInfo = await connection.getAccountInfo(bonding, "processed")
-    console.log("🚀 ~ accountInfo:", accountInfo)
-
-    if(!accountInfo) return
-
-    // get the poolstate of the bonding curve
-    const poolState = BONDING_CURV.decode(
-      accountInfo.data
-    );
-    console.log("🚀 ~ poolState:", poolState)
-    console.log("virtualTokenReserves: ", poolState.virtualTokenReservs.toString());
-    console.log("realTokenReserves: ", poolState.realTokenReserves.toString());
-    // Calculate tokens out
-    const virtualSolReserves = poolState.virtualSolReserves;
-    const virtualTokenReserves = poolState.virtualTokenReservs;
-
-    console.log("virtualSolReserves: ", virtualSolReserves.toString());
-    console.log("virtualTokenReserves", virtualTokenReserves.toString());
-
-    const tokenAccountInfo = await connection.getAccountInfo(tokenAccountAddress);
-
-    let tokenAccount: PublicKey;
-    if (!tokenAccountInfo) {
-      txBuilder.add(
-        createAssociatedTokenAccountInstruction(
-          owner.publicKey,
-          tokenAccountAddress,
-          owner.publicKey,
-          mint
-        )
-      );
-      tokenAccount = tokenAccountAddress;
-    } else {
-      tokenAccount = tokenAccountAddress;
-    }
-
-    console.log("Before the calculation of minSol:");
+    
+    await getPoolState(new PublicKey("FohZto437neLgh8dRgBRapLqbKDBofW9nkS62JXj2d8f"));
+    
+    // console.log("virtualSolReserves: ", virtualSolReserves.toString());
+    // console.log("virtualTokenReserves", virtualTokenReserves.toString());
+    
+    // Calculate the sell price
+    const sellPrice = (virtualTokenReserves.div(virtualSolReserves)).toNumber();
+    
+    // Check if the price is good for the Stop_Loss and take_profit
+    const netChange = (sellPrice - buyPrice) / buyPrice;
+    if (stopLoss + netChange > 0 && netChange < 0 || netChange < takeProfit && netChange > 0) return false;
+    
+    // const tokenAccountInfo = await connection.getAccountInfo(tokenAccountAddress);
+    const tokenAccount = tokenAccountAddress;
+    
     const minSolOutput = Math.floor(tokenBalance * (1 - slippageDecimal) * (virtualSolReserves.mul(new BN(1000000)).div(virtualTokenReserves)).toNumber());
-    console.log("After the calculation of minSol: ", minSolOutput);
-
+    console.log("minSolOut: ", minSolOutput);
+    
     const keys = [
       { pubkey: GLOBAL, isSigner: false, isWritable: false },
       { pubkey: FEE_RECIPIENT, isSigner: false, isWritable: true },
@@ -412,20 +399,31 @@ export async function sell(payerKeypair: Keypair, mint: PublicKey, tokenBalance:
       bufferFromUInt64(tokenBalance),
       bufferFromUInt64(minSolOutput)
     ]);
-
+    
+    
     const instruction = new TransactionInstruction({
       keys: keys,
       programId: PUMP_FUN_PROGRAM,
       data: data
     });
+
+    const blockhash = await connection.getLatestBlockhash("confirmed")
+
     txBuilder.add(instruction);
-
+    txBuilder.feePayer = owner.publicKey;
+    txBuilder.recentBlockhash = blockhash.blockhash;
+    console.log(await connection.simulateTransaction(txBuilder));
+    
+    txBuilder.add(createCloseAccountInstruction(tokenAccount, owner.publicKey, owner.publicKey))
+    
     const transaction = await createTransaction(connection, txBuilder.instructions, owner.publicKey, priorityFeeInSol);
+    // console.log(transaction);
+    console.log("Ok");
     console.log(await connection.simulateTransaction(transaction))
-
-
+    console.log("Ok");
+    
     const signature = await sendAndConfirmTransactionWrapper(connection, transaction, [owner]);
-    if(signature) console.log('Sell transaction confirmed:', signature);
+    if (signature) console.log('Sell transaction confirmed:', signature);
   }
   catch (error) {
     console.log(error)
@@ -434,5 +432,29 @@ export async function sell(payerKeypair: Keypair, mint: PublicKey, tokenBalance:
 
 
 
-runListener()
-// sell(payerKeypair, new PublicKey("2qjuitee5a4brvEDLb196mn3Fmb1efb9o6k27rR7cQHg"), 6492000000, 0.00002, 1, new PublicKey("3K7YAGdkhdu8pDDjtpq6idf6x3jpmgi38ib28vCxemnb"))
+const getPoolState = async (mint: PublicKey) => {
+  // get the address of bonding curve and associated bonding curve
+  [bonding] = PublicKey.findProgramAddressSync([BONDING_ADDR_SEED, mint.toBuffer()], TRADE_PROGRAM_ID);
+  [assoc_bonding_addr] = PublicKey.findProgramAddressSync([bonding.toBuffer(), TOKEN_PROGRAM_ID.toBuffer(), mint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM_ID);
+
+  // get the accountinfo of bonding curve
+  const accountInfo = await connection.getAccountInfo(bonding, "processed")
+  // console.log("🚀 ~ accountInfo:", accountInfo)
+  if (!accountInfo) return
+
+  // get the poolstate of the bonding curve
+  const poolState = BONDING_CURV.decode(
+    accountInfo.data
+  );
+  console.log("🚀 ~ poolState:", poolState)
+  // console.log("virtualTokenReserves: ", poolState.virtualTokenReserves.toString());
+  // console.log("realTokenReserves: ", poolState.realTokenReserves.toString());
+
+  // Calculate tokens out
+  virtualSolReserves = poolState.virtualSolReserves;
+  virtualTokenReserves = poolState.virtualTokenReserves;
+}
+
+// runListener()
+
+sell(payerKeypair, new PublicKey("FohZto437neLgh8dRgBRapLqbKDBofW9nkS62JXj2d8f"), 3408000000, 0.00002, 1, new PublicKey("9J22gw9Tj91LkEHpTjvzCSuExDmtNs3erFZXDqD9ftWb"))

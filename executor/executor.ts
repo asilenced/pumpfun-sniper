@@ -47,7 +47,7 @@ export async function bull_dozer(txs: VersionedTransaction[], keypair: Keypair, 
     const keyapair_num = Math.floor(Math.random() * jito_auth_keypair_array.length);
     const jito_auth_keypair = jito_auth_keypair_array[keyapair_num];
     const jitoKey = Keypair.fromSecretKey(base58.decode(jito_auth_keypair));
-    console.log('jitoKey', jitoKey)
+    console.log('jitoKey', jitoKey.publicKey)
     
     const blockengine_url_array = BLOCKENGINE_URL.split(',');
     const blockengine_num = Math.floor(Math.random() * blockengine_url_array.length);
@@ -81,7 +81,7 @@ async function build_bundle(
   connection: Connection
 ) {
   const accounts = await search.getTipAccounts()
-  console.log("tip account:", accounts)
+  // console.log("tip account:", accounts)
   const _tipAccount = accounts[Math.min(Math.floor(Math.random() * accounts.length), 3)]
   const tipAccount = new PublicKey(_tipAccount)
 
@@ -90,7 +90,7 @@ async function build_bundle(
   bund.addTransactions(...txs);
 
   console.log("--------------");
-  console.log(txs);
+  // console.log(txs);
 
   let maybeBundle = bund.addTipTx(
     keypair,
@@ -98,7 +98,7 @@ async function build_bundle(
     tipAccount,
     resp.blockhash
   )
-  console.log({maybeBundle})
+  // console.log({maybeBundle})
 
   if (isError(maybeBundle)) {
     throw maybeBundle
