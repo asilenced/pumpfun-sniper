@@ -54,23 +54,14 @@ import {
   CHECK_FILTER,
   JITO_MODE,
   ASSOC_TOKEN_ACC_PROG,
-  // AUTO_BUY,
-  // AUTO_SELL,
-  // TX_NUMBER_BUY,
-  // TX_NUMBER_SELL,
-  // TAKE_PROFIT,
-  STOP_LOSS,
-  // TX_DELAY,
-  // FEE_PER_TX,
-  // UNITS,
-  // CHECK_DEV_SELL,
-  // SOL_IN,
 } from "./constants";
 
 import { filterToken } from "./tokenFilter";
 import fs from "fs"
 import BN from "bn.js";
 import base58 from "bs58";
+import readline from "readline"
+import { snipe_menu } from "./bot_starter";
 
 const fileName = "./config.json"
 const fileName2 = "./config_sniper.json"
@@ -94,7 +85,7 @@ const txDelay = content2.txDelay;
 const txFee = content2.txFee;
 const computeUnit = content2.computeUnit;
 
-const connection = new Connection(RPC_ENDPOINT, { wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment: "processed" });
+const connection = new Connection(RPC_ENDPOINT, { wsEndpoint: RPC_WEBSOCKET_ENDPOINT, commitment: "confirmed" });
 
 let virtualSolReserves: BN;
 let virtualTokenReserves: BN;
@@ -110,7 +101,12 @@ let isBought = false;
 let buyPrice: number;
 let globalLogListener: number | null = null
 
-export const runListener = async () => {
+let rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout
+})
+
+export const runListenerAutomatic = async () => {
   try {
     globalLogListener = connection.onLogs(
       PUMP_FUN_PROGRAM,
@@ -164,8 +160,8 @@ export const runListener = async () => {
               const buyerAta = await getAssociatedTokenAddress(mint, payerKeypair.publicKey)
               // console.log("BuyerAta: ", buyerAta);
               const balance = (await connection.getTokenAccountBalance(buyerAta)).value.amount
-              // console.log("BuyerAtaBalance: ", balance);
-              const priorityFeeInSol = computeUnit * txFee / 10 ** 9 / 10 ** 6;
+              console.log("BuyerAtaBalance: ", balance);
+              const priorityFeeInSol = txFee;     // SOL
 
               console.log("========== Token Sell start ===========");
 
@@ -183,6 +179,9 @@ export const runListener = async () => {
           }
           isBuying = false
           console.log("isBuying: ", isBuying);
+          rl.question("Press Enter to continue Sniping.", () => {
+            snipe_menu();
+          })
           // if (isBought) process.exit(1);
         }
       },
@@ -192,6 +191,103 @@ export const runListener = async () => {
     console.log(err);
   }
 };
+
+export const runListenerManual = async () => {
+  try {
+    globalLogListener = connection.onLogs(
+      PUMP_FUN_PROGRAM,
+      async ({ logs, err, signature }) => {
+        const isMint = logs.filter(log => log.includes("MintTo")).length;
+        if (!isBuying && isMint && !isBought) {
+          isBuying = true
+
+          console.log("\n============== Found new token in the pump.fun: ==============\n")
+          console.log("signature: ", signature);
+
+          const parsedTransaction = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" });
+          if (!parsedTransaction) {
+            console.log("bad Transaction, signature: ", signature);
+            isBuying = false
+            return;
+          }
+
+          const wallet = parsedTransaction?.transaction.message.accountKeys[0].pubkey;
+          const mint = parsedTransaction?.transaction.message.accountKeys[1].pubkey;
+          const tokenPoolAta = parsedTransaction?.transaction.message.accountKeys[4].pubkey;
+          console.log("mint:", mint)
+          console.log("tokenPoolAta:", tokenPoolAta)
+          console.log("wallet:", wallet)
+
+          // check token if the filtering condition is ok
+          if (CHECK_FILTER) {
+
+            // true if the filtering condition is ok, false if the filtering condition is false
+            const buyable = await filterToken(connection, mint!, commitment, wallet!, tokenPoolAta!);
+            console.log("🚀 ~ Token is Buyable:", buyable)
+
+            if (buyable) {
+
+              await getPoolState(mint);
+
+              console.log("========= Token Buy start ==========");
+
+              try {
+                connection.removeOnLogsListener(globalLogListener!)
+                console.log("Global listener is removed!");
+              } catch (err) {
+                console.log(err);
+              }
+
+              // buy transaction
+              await buy(payerKeypair, mint, solIn / 10 ** 9, 10);
+
+              console.log("========= Token Buy end ===========");
+
+              const buyerAta = await getAssociatedTokenAddress(mint, payerKeypair.publicKey)
+              // console.log("BuyerAta: ", buyerAta);
+              const balance = (await connection.getTokenAccountBalance(buyerAta)).value.amount
+              console.log("BuyerAtaBalance: ", balance);
+              const priorityFeeInSol = txFee;     // SOL
+
+
+              rl.question("Press 1 to continue Selling.\n Press 2 to return", async (answer) => {
+                let choice = parseInt(answer);
+                if(choice == 1) {
+                  await getPoolState(mint);
+                  
+                  if (!balance) {
+                    console.log("There is no token in this wallet.");
+                    await sleep(3000)
+                  } else {
+                    // sell transaction
+                    console.log("========== Token Sell start ===========");
+                    await sell(payerKeypair, mint, Number(balance), priorityFeeInSol, SLIPPAGE / 100, buyerAta);
+                    console.log("========== Token Sell end ==========");
+                  }
+                }
+                else if(choice == 2) {
+                  await getPoolState(mint);
+                }
+                snipe_menu();
+              })
+            }
+          }
+          isBuying = false
+          // console.log("isBuying: ", isBuying);
+          rl.question("Press Enter to continue Sniping.", () => {
+            snipe_menu();
+          })
+          // if (isBought) process.exit(1);
+        }
+      },
+      commitment
+    );
+  } catch (err) {
+    console.log(err);
+  }
+};
+
+
 
 export const buy = async (
   keypair: Keypair,
@@ -207,17 +303,19 @@ export const buy = async (
   let buyerAta = await getAssociatedTokenAddress(tokenMint, buyerWallet)
 
   try {
+    const transactions: VersionedTransaction[] = []
 
-    // console.log("🚀 ~ buyerAta:", buyerAta)
+    console.log("🚀 ~ buyerAta:", buyerAta)
 
     let ixs: TransactionInstruction[] = [
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: txFee }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: Math.floor(txFee * 10 ** 9 / computeUnit * 10 ** 6) }),
       ComputeBudgetProgram.setComputeUnitLimit({ units: computeUnit })
     ];
 
     // Attempt to retrieve token account, otherwise create associated token account
     try {
-      const buyerTokenAccountInfo = await connection.getAccountInfo(buyerAta, "processed")
+      
+      const buyerTokenAccountInfo = await connection.getAccountInfo(buyerAta)
       if (!buyerTokenAccountInfo) {
         ixs.push(
           createAssociatedTokenAccountInstruction(
@@ -234,17 +332,17 @@ export const buy = async (
     }
 
     const solInLamports = solIn * LAMPORTS_PER_SOL;
-    // console.log("🚀 ~ solInLamports:", solInLamports)
+    console.log("🚀 ~ solInLamports:", solInLamports)
     const tokenOut = Math.round(solInLamports * (virtualTokenReserves.div(virtualSolReserves)).toNumber());
-    // console.log("🚀 ~ tokenOut:", tokenOut)
+    console.log("🚀 ~ tokenOut:", tokenOut)
 
     // Calculate the buy price of the token
     buyPrice = (virtualTokenReserves.div(virtualSolReserves)).toNumber();
 
     const ATA_USER = buyerAta;
     const USER = buyerWallet;
-    // console.log("🚀 ~ buyerAta:", buyerAta)
-    // console.log("🚀 ~ buyerWallet:", buyerWallet)
+    console.log("🚀 ~ buyerAta:", buyerAta)
+    console.log("🚀 ~ buyerWallet:", buyerWallet)
 
     // Build account key list
     const keys = [
@@ -262,16 +360,16 @@ export const buy = async (
       { pubkey: PUMP_FUN_PROGRAM, isSigner: false, isWritable: false }
     ];
 
-    // keys.map(async ({ pubkey }, i) => {
-    //   const info = await connection.getAccountInfo(pubkey, "confirmed")
-    //   if (!info) console.log(pubkey.toBase58(), " address info : null : ", i)
-    // })
+    keys.map(async ({ pubkey }, i) => {
+      const info = await connection.getAccountInfo(pubkey)
+      if (!info) console.log(pubkey.toBase58(), " address info : null : ", i)
+    })
 
     // Calculating the slippage process
     const calc_slippage_up = (sol_amount: number, slippage: number): number => {
       const lamports = sol_amount * LAMPORTS_PER_SOL;
-      // return Math.round(lamports * (1 + slippage));
-      // return Math.round(lamports / 1000 * (1 + slippage) + lamports / 1000 * (1 + slippage));
+      return Math.round(lamports * (1 + slippage));
+      return Math.round(lamports / 1000 * (1 + slippage) + lamports / 1000 * (1 + slippage));
       return Math.round(lamports / 1000 * (1 + slippage / 100));
     }
 
@@ -289,7 +387,7 @@ export const buy = async (
     })
 
     ixs.push(swapInstruction)
-    const blockhash = await connection.getLatestBlockhash("confirmed")
+    const blockhash = await connection.getLatestBlockhash()
 
     // simulation process
     // const tx = new Transaction().add(...ixs)
@@ -305,8 +403,7 @@ export const buy = async (
     const transaction = new VersionedTransaction(messageV0)
     transaction.sign([buyerKeypair])
     console.log("==============================================")
-    // console.log(await connection.simulateTransaction(transaction, { commitment: "processed" }))
-    // transactions.push(transaction)
+    console.log(await connection.simulateTransaction(transaction))
 
     // Bundling process
     console.log("JITO_MODE:", JITO_MODE);
@@ -338,30 +435,27 @@ export const buy = async (
       }
     } catch (error) {
       index++
-      await sleep(txDelay)
+      await sleep(txDelay * 1000)
     }
   }
   console.log("Bundling result confirmed, successfully bought")
 }
 
-
-
-
-
-export async function sell(
+export const sell = async (
   payerKeypair: Keypair,
   mint: PublicKey,
   tokenBalance: number,
   priorityFeeInSol: number = 0,
   slippageDecimal: number = 0.25,
   tokenAccountAddress: PublicKey
-) {
+) => {
   
   try {
     const owner = payerKeypair;
     const txBuilder = new Transaction();
     
-    await getPoolState(new PublicKey("FohZto437neLgh8dRgBRapLqbKDBofW9nkS62JXj2d8f"));
+    // await getPoolState(new PublicKey("ZsPzY1DASFhBshVS4ErHsN8UEqLQwGpeHMh17Yepump"));
+    await getPoolState(mint);
     
     // console.log("virtualSolReserves: ", virtualSolReserves.toString());
     // console.log("virtualTokenReserves", virtualTokenReserves.toString());
@@ -371,7 +465,25 @@ export async function sell(
     
     // Check if the price is good for the Stop_Loss and take_profit
     const netChange = (sellPrice - buyPrice) / buyPrice;
-    if (stopLoss + netChange > 0 && netChange < 0 || netChange < takeProfit && netChange > 0) return false;
+    console.log("Net change : ", netChange);
+    
+    let index = 0;
+    if (stopLoss + netChange * 100 > 0 && netChange < 0 || netChange * 100 < takeProfit && netChange > 0) {
+      index++;
+      if(index > txNum) {
+        console.log("---Selling failed.---");
+        return false;
+      }
+      if(netChange < 0) {
+        console.log("Price goes down under the stopLoss");
+        await sleep(txDelay * 1000)
+        await sell(payerKeypair, mint, tokenBalance, priorityFeeInSol, slippageDecimal, tokenAccountAddress);
+      } else if(netChange > 0) {
+        console.log("Price not goes up over the takeProfit");
+        await sleep(txDelay * 1000)
+        await sell(payerKeypair, mint, tokenBalance, priorityFeeInSol, slippageDecimal, tokenAccountAddress);
+      }
+    }
     
     // const tokenAccountInfo = await connection.getAccountInfo(tokenAccountAddress);
     const tokenAccount = tokenAccountAddress;
@@ -400,14 +512,13 @@ export async function sell(
       bufferFromUInt64(minSolOutput)
     ]);
     
-    
     const instruction = new TransactionInstruction({
       keys: keys,
       programId: PUMP_FUN_PROGRAM,
       data: data
     });
 
-    const blockhash = await connection.getLatestBlockhash("confirmed")
+    const blockhash = await connection.getLatestBlockhash()
 
     txBuilder.add(instruction);
     txBuilder.feePayer = owner.publicKey;
@@ -417,6 +528,9 @@ export async function sell(
     txBuilder.add(createCloseAccountInstruction(tokenAccount, owner.publicKey, owner.publicKey))
     
     const transaction = await createTransaction(connection, txBuilder.instructions, owner.publicKey, priorityFeeInSol);
+    console.log("🚀 ~ priorityFeeInSol:", priorityFeeInSol)
+
+    
     // console.log(transaction);
     console.log("Ok");
     console.log(await connection.simulateTransaction(transaction))
@@ -457,4 +571,4 @@ const getPoolState = async (mint: PublicKey) => {
 
 // runListener()
 
-sell(payerKeypair, new PublicKey("FohZto437neLgh8dRgBRapLqbKDBofW9nkS62JXj2d8f"), 3408000000, 0.00002, 1, new PublicKey("9J22gw9Tj91LkEHpTjvzCSuExDmtNs3erFZXDqD9ftWb"))
+// sell(payerKeypair, new PublicKey("ZsPzY1DASFhBshVS4ErHsN8UEqLQwGpeHMh17Yepump"), 6500000000, 0.00002, 1, new PublicKey("2CzeRJcFd9bUDEtL8YK8m1NmkEwS7J53f2yao9Uzksdk"))

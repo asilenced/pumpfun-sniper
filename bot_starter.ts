@@ -17,7 +17,7 @@ import {
     constants_setting_title_display,
 } from "./menus/menus";
 import { sleep } from "./utility";
-import { runListener } from "./bot";
+import { runListenerAutomatic, runListenerManual } from "./bot";
 
 const fileName = "./config_sniper.json"
 const fileName2 = "./config_sniper.json"
@@ -94,7 +94,8 @@ export const automaticSnipe = async () => {
     screen_clear();
     automatic_sniper_title_display();
     console.log("automatic sniping....");
-    // await runListener();
+    await sleep(3000)
+    await runListenerAutomatic();
     snipe_menu();
 }
 
@@ -102,7 +103,8 @@ export const manualSnipe = async () => {
     screen_clear();
     manual_sniper_title_display();
     console.log("manual sniping....");
-    await sleep(3000);
+    await sleep(3000)
+    await runListenerManual();
     snipe_menu();
 }
 
@@ -171,7 +173,7 @@ export const constantsSetting = () => {
             rl.question('\t[Settings] - Transaction Fee: ', async (answer) => {
                 let file_content = fs.readFileSync(fileName2, 'utf-8');
                 let content = JSON.parse(file_content);
-                content.txFee = parseInt(answer);
+                content.txFee = parseFloat(answer);
                 fs.writeFileSync(fileName2, JSON.stringify(content, null, 2))
                 console.log("Transaction Fee is updated.");
                 await sleep(2000);

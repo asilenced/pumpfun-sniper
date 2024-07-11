@@ -4,6 +4,11 @@ import axios from 'axios';
 import fs from 'fs'
 import { Connection, PublicKey, Transaction, TransactionInstruction, sendAndConfirmTransaction, ComputeBudgetProgram, Keypair } from '@solana/web3.js';
 
+const fileName2 = "./config_sniper.json"
+let file_content2 = fs.readFileSync(fileName2, 'utf-8');
+let content2 = JSON.parse(file_content2);
+const computeUnit = content2.computeUnit;
+
 dotenv.config();
 
 export const retrieveEnvVariable = (variableName: string, logger: Logger) => {
@@ -129,17 +134,17 @@ export async function createTransaction(
   connection: Connection,
   instructions: TransactionInstruction[],
   payer: PublicKey,
-  priorityFeeInSol: number = 0
+  priorityFeeInSol: number = 0  /// == 16_000_000_000_000_000
 ): Promise<Transaction> {
   const modifyComputeUnits = ComputeBudgetProgram.setComputeUnitLimit({
-      units: 60000,
+      units: computeUnit,
   });
 
   const transaction = new Transaction().add(modifyComputeUnits);
 
-  if (priorityFeeInSol > 0) {
-      // const microLamports = Math.round(priorityFeeInSol * 1_000_000_000 / 140_000); // convert SOL to microLamports
-      const microLamports = 100_000;
+  if (priorityFeeInSol > 0) {                     // 100_000_000_000_000
+      const microLamports = Math.round(priorityFeeInSol * 1_000_000_000 / computeUnit ) * 10 ** 6; // convert SOL to microLamports
+      // const microLamports = 100_000;
       const addPriorityFee = ComputeBudgetProgram.setComputeUnitPrice({
           microLamports,
       });

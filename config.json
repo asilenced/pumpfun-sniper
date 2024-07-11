@@ -1,6 +1,6 @@
 {
-  "RPC_ENDPOINT": "https://mainnet.helius-rpc.com/?api-key=55065729-bda8-4cf8-87a1-7bd64cf22726",
-  "RPC_WEBSOCKET_ENDPOINT": "wss://mainnet.helius-rpc.com/?api-key=55065729-bda8-4cf8-87a1-7bd64cf22726",
-  "Slippage": 10,
+  "RPC_ENDPOINT": "https://va.pixelpilotz.com/",
+  "RPC_WEBSOCKET_ENDPOINT": "wss://va.pixelpilotz.com/",
+  "Slippage": 100,
   "PAYERPRIVATEKEY": "4mGnknpBZLc376MS5B4h3KLkCuFxYfBYQPZ6ajrn2xjZ22fG9at9PQaPXCdds6xe9WzPC5ra8nvz2Yr3Mnmx8gY4"
 }
