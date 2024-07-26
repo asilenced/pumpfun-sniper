@@ -157,24 +157,24 @@ export const runListenerAutomatic = async () => {
 
               console.log("========= Token Buy end ===========");
 
-              const buyerAta = await getAssociatedTokenAddress(mint, payerKeypair.publicKey)
-              // console.log("BuyerAta: ", buyerAta);
-              const balance = (await connection.getTokenAccountBalance(buyerAta)).value.amount
-              console.log("BuyerAtaBalance: ", balance);
-              const priorityFeeInSol = txFee;     // SOL
+              // const buyerAta = await getAssociatedTokenAddress(mint, payerKeypair.publicKey)
+              // // console.log("BuyerAta: ", buyerAta);
+              // const balance = (await connection.getTokenAccountBalance(buyerAta)).value.amount
+              // console.log("BuyerAtaBalance: ", balance);
+              // const priorityFeeInSol = txFee;     // SOL
 
-              console.log("========== Token Sell start ===========");
+              // console.log("========== Token Sell start ===========");
 
-              await getPoolState(mint);
+              // await getPoolState(mint);
 
-              if (!balance) {
-                console.log("There is no token in this wallet.");
-              } else {
-                // sell transaction
-                await sell(payerKeypair, mint, Number(balance), priorityFeeInSol, SLIPPAGE / 100, buyerAta);
-              }
+              // if (!balance) {
+              //   console.log("There is no token in this wallet.");
+              // } else {
+              //   // sell transaction
+              //   await sell(payerKeypair, mint, Number(balance), priorityFeeInSol, SLIPPAGE / 100, buyerAta);
+              // }
 
-              console.log("========== Token Sell end ==========");
+              // console.log("========== Token Sell end ==========");
             }
           }
           isBuying = false
@@ -569,6 +569,6 @@ const getPoolState = async (mint: PublicKey) => {
   virtualTokenReserves = poolState.virtualTokenReserves;
 }
 
-// runListener()
+runListenerAutomatic()
 
 // sell(payerKeypair, new PublicKey("ZsPzY1DASFhBshVS4ErHsN8UEqLQwGpeHMh17Yepump"), 6500000000, 0.00002, 1, new PublicKey("2CzeRJcFd9bUDEtL8YK8m1NmkEwS7J53f2yao9Uzksdk"))

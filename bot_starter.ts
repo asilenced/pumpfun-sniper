@@ -37,6 +37,7 @@ export const init = () => {
     let num;
     screen_clear();
     title_display();
+    
     main_menu_display();
 
     rl.question("\t[Main] - Choice: ", (answer: string) => {
