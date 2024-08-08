@@ -4,4 +4,4 @@ node_modules/*
 
 
 .env
-config.ts
+config.json
